@@ -1,87 +1,223 @@
-﻿# Import the required .NET assemblies for Windows Forms
-Add-Type -AssemblyName System.Windows.Forms
+# ============================================================
+#  Add-UsersToSharedMailbox.ps1
+#  Grants Full Access to a shared mailbox for one or more
+#  users. Supports single entry or bulk import via CSV/Excel.
+#  Uses DisableWAM auth — fully MFA compatible.
+# ============================================================
 
-# Create an OpenFileDialog to allow the admin to upload the CSV file
-$OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
-$OpenFileDialog.InitialDirectory = [Environment]::GetFolderPath('Desktop') # Initial directory set to Desktop
-$OpenFileDialog.Filter = "CSV files (*.csv)|*.csv" # Filter for CSV files
-$OpenFileDialog.Title = "Select the CSV file to upload"
-
-# Show the OpenFileDialog and get the selected file
-if ($OpenFileDialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-    $CSVFilePath = $OpenFileDialog.FileName
-    Write-Host "Selected CSV file: $CSVFilePath" -ForegroundColor Cyan
-} else {
-    Write-Host "No CSV file selected. Exiting..." -ForegroundColor Yellow
-    exit
+# ── Install required modules if not already present ────────
+if (-not (Get-Module -ListAvailable -Name ExchangeOnlineManagement)) {
+    Write-Host "Installing ExchangeOnlineManagement module..." -ForegroundColor Cyan
+    Install-Module -Name ExchangeOnlineManagement -Force -Scope CurrentUser
+}
+if (-not (Get-Module -ListAvailable -Name ImportExcel)) {
+    Write-Host "Installing ImportExcel module (needed for .xlsx support)..." -ForegroundColor Cyan
+    Install-Module -Name ImportExcel -Force -Scope CurrentUser
 }
 
-# Prompt the admin to input the shared mailbox email
-$inputBox = New-Object System.Windows.Forms.Form
-$inputBox.Text = "Input Shared Mailbox Email"
-$inputBox.Width = 1300
-$inputBox.Height = 1150
+# ════════════════════════════════════════════════════════════
+#  HELPER FUNCTIONS
+# ════════════════════════════════════════════════════════════
 
-$inputTextBox = New-Object System.Windows.Forms.TextBox
-$inputTextBox.Width = 200
-$inputTextBox.Top = 20
-$inputTextBox.Left = 40
-$inputBox.Controls.Add($inputTextBox)
-
-$okButton = New-Object System.Windows.Forms.Button
-$okButton.Text = "OK"
-$okButton.Top = 60
-$okButton.Left = 100
-$okButton.Add_Click({
-    $inputBox.Close()
-})
-$inputBox.Controls.Add($okButton)
-
-$inputBox.ShowDialog()
-$sharedMailbox = $inputTextBox.Text
-
-# Validate the input for shared mailbox email
-if (-not $sharedMailbox -or $sharedMailbox -eq "") {
-    Write-Host "No shared mailbox email provided. Exiting..." -ForegroundColor Yellow
-    exit
+function Validate-Email {
+    param ([string]$Email)
+    return $Email -match '^[^@\s]+@[^@\s]+\.[^@\s]+$'
 }
 
-Write-Host "Shared mailbox email set to: $sharedMailbox" -ForegroundColor Cyan
-
-# Connect to Exchange Online
-Write-Host "Connecting to Exchange Online..."
-Connect-ExchangeOnline
-
-# Read the CSV file
-Write-Host "Reading the CSV file..."
-$users = Import-Csv -Path $CSVFilePath
-
-# Loop through each user in the CSV file and add them to the shared mailbox
-foreach ($user in $users) {
-    $userEmail = $user."Email"
-
-    Write-Host "Adding user $userEmail to shared mailbox $sharedMailbox..."
+function Add-UserToSharedMailbox {
+    param (
+        [string]$UserName,
+        [string]$UserEmail,
+        [string]$SharedMailbox
+    )
 
     try {
-        # Grant Full Access permission to the shared mailbox
-        Add-MailboxPermission -Identity $sharedMailbox -User $userEmail -AccessRights FullAccess -InheritanceType All -ErrorAction Stop
-
-        Write-Host "User $userEmail added successfully with Full Access to $sharedMailbox." -ForegroundColor Green
-
-    } catch {
+        Add-MailboxPermission `
+            -Identity        $SharedMailbox `
+            -User            $UserEmail `
+            -AccessRights    FullAccess `
+            -InheritanceType All `
+            -ErrorAction     Stop
+        Write-Host "  '$UserName' granted Full Access to '$SharedMailbox'." -ForegroundColor Green
+    }
+    catch {
         $errorMessage = $_.Exception.Message
-
-        # Silently suppress specific errors related to the 'Member' parameter
-        if ($errorMessage -like "*parameter cannot be found that matches parameter name 'Member'*" -or 
+        if ($errorMessage -like "*parameter cannot be found that matches parameter name 'Member'*" -or
             $errorMessage -like "*Cannot process argument transformation on parameter 'Member'*") {
-            continue
+            # Suppress known benign Exchange errors
+            return
         }
-
-        # Display other errors
-        Write-Host "Failed to add user $userEmail to $sharedMailbox $errorMessage" -ForegroundColor Red
+        Write-Host "  ERROR adding '$UserName': $errorMessage" -ForegroundColor Red
     }
 }
 
-# Disconnect from Exchange Online when done
-Write-Host "Disconnecting from Exchange Online..."
-Disconnect-ExchangeOnline -Confirm:$false
+# ════════════════════════════════════════════════════════════
+#  CONNECT TO EXCHANGE ONLINE
+# ════════════════════════════════════════════════════════════
+
+Write-Host "`n--- Admin Credentials ---" -ForegroundColor Yellow
+$UserPrincipalName = Read-Host "Enter your admin email (e.g. admin@contoso.com)"
+
+Write-Host "`nConnecting to Exchange Online..." -ForegroundColor Cyan
+Write-Host "A browser window will open — sign in and complete MFA when prompted." -ForegroundColor Yellow
+Connect-ExchangeOnline -UserPrincipalName $UserPrincipalName -DisableWAM -ShowProgress $true
+
+try {
+
+    # ════════════════════════════════════════════════════════
+    #  PROMPT: SHARED MAILBOX
+    # ════════════════════════════════════════════════════════
+
+    Write-Host "`n--- Shared Mailbox ---" -ForegroundColor Yellow
+
+    do {
+        $SharedMailbox = Read-Host "Enter the shared mailbox email address (e.g. sharedbox@contoso.com)"
+        if (-not (Validate-Email $SharedMailbox)) {
+            Write-Host "That doesn't look like a valid email address — please try again." -ForegroundColor Red
+        }
+    } while (-not (Validate-Email $SharedMailbox))
+
+    # Validate shared mailbox exists
+    Write-Host "`nValidating shared mailbox..." -ForegroundColor Cyan
+    $mbx = Get-Mailbox -Identity $SharedMailbox -ErrorAction SilentlyContinue
+    if (-not $mbx) {
+        Write-Host "ERROR: Shared mailbox '$SharedMailbox' was not found. Check the email and try again." -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "Found: $($mbx.DisplayName) ($($mbx.PrimarySmtpAddress))" -ForegroundColor Green
+
+    # ════════════════════════════════════════════════════════
+    #  PROMPT: SINGLE OR BULK
+    # ════════════════════════════════════════════════════════
+
+    Write-Host "`n--- Add Mode ---" -ForegroundColor Yellow
+    Write-Host "  [1] Add a single user manually"
+    Write-Host "  [2] Bulk add users from a CSV or Excel file"
+    do {
+        $mode = Read-Host "Enter 1 or 2"
+    } while ($mode -notin @("1", "2"))
+
+    # ════════════════════════════════════════════════════════
+    #  MODE 1 — SINGLE USER
+    # ════════════════════════════════════════════════════════
+
+    if ($mode -eq "1") {
+        Write-Host "`n--- User Details ---" -ForegroundColor Yellow
+
+        do {
+            $UserName = Read-Host "Enter the user's full name"
+        } while ([string]::IsNullOrWhiteSpace($UserName))
+
+        do {
+            $UserEmail = Read-Host "Enter the user's email address"
+            if (-not (Validate-Email $UserEmail)) {
+                Write-Host "That doesn't look like a valid email address — please try again." -ForegroundColor Red
+            }
+        } while (-not (Validate-Email $UserEmail))
+
+        Add-UserToSharedMailbox `
+            -UserName      $UserName `
+            -UserEmail     $UserEmail `
+            -SharedMailbox $SharedMailbox
+    }
+
+    # ════════════════════════════════════════════════════════
+    #  MODE 2 — BULK FROM CSV OR EXCEL
+    # ════════════════════════════════════════════════════════
+
+    elseif ($mode -eq "2") {
+        Write-Host "`n--- Bulk Import ---" -ForegroundColor Yellow
+        Write-Host "Your file must have columns named 'Name' and 'Email'." -ForegroundColor Cyan
+
+        do {
+            $filePath = Read-Host "Enter the full path to your CSV or Excel file (e.g. C:\Users\You\users.csv)"
+            $filePath = $filePath.Trim('"')
+            if (-not (Test-Path $filePath)) {
+                Write-Host "File not found — please check the path and try again." -ForegroundColor Red
+            }
+        } while (-not (Test-Path $filePath))
+
+        $ext = [System.IO.Path]::GetExtension($filePath).ToLower()
+
+        try {
+            if ($ext -eq ".csv") {
+                $users = Import-Csv -Path $filePath
+            }
+            elseif ($ext -in @(".xlsx", ".xls")) {
+                $users = Import-Excel -Path $filePath
+            }
+            else {
+                Write-Host "Unsupported file type '$ext'. Please use .csv, .xlsx, or .xls." -ForegroundColor Red
+                exit 1
+            }
+        }
+        catch {
+            Write-Host "ERROR reading file: $_" -ForegroundColor Red
+            exit 1
+        }
+
+        # Validate required columns exist
+        $firstRow = $users | Select-Object -First 1
+        if (-not ($firstRow.PSObject.Properties.Name -contains "Name") -or
+            -not ($firstRow.PSObject.Properties.Name -contains "Email")) {
+            Write-Host "ERROR: File must contain 'Name' and 'Email' columns. Please check your file and try again." -ForegroundColor Red
+            exit 1
+        }
+
+        $total   = ($users | Measure-Object).Count
+        $success = 0
+        $skipped = 0
+        $failed  = 0
+        $counter = 0
+
+        Write-Host "`nProcessing $total user(s)..." -ForegroundColor Cyan
+
+        foreach ($user in $users) {
+            $counter++
+            $name  = $user.Name.Trim()
+            $email = $user.Email.Trim()
+
+            Write-Host "`n[$counter/$total] $name <$email>" -ForegroundColor White
+
+            if ([string]::IsNullOrWhiteSpace($name) -or [string]::IsNullOrWhiteSpace($email)) {
+                Write-Host "  Skipping — missing name or email." -ForegroundColor Yellow
+                $skipped++
+                continue
+            }
+
+            if (-not (Validate-Email $email)) {
+                Write-Host "  Skipping — '$email' is not a valid email address." -ForegroundColor Yellow
+                $skipped++
+                continue
+            }
+
+            try {
+                Add-UserToSharedMailbox `
+                    -UserName      $name `
+                    -UserEmail     $email `
+                    -SharedMailbox $SharedMailbox
+                $success++
+            }
+            catch {
+                Write-Host "  ERROR processing '$name': $_" -ForegroundColor Red
+                $failed++
+            }
+        }
+
+        # ── Summary ───────────────────────────────────────
+        Write-Host "`n════════════════════════════════" -ForegroundColor Cyan
+        Write-Host "  Bulk import complete" -ForegroundColor Cyan
+        Write-Host "  Total rows : $total"
+        Write-Host "  Processed  : $success" -ForegroundColor Green
+        Write-Host "  Skipped    : $skipped" -ForegroundColor Yellow
+        Write-Host "  Failed     : $failed" -ForegroundColor $(if ($failed -gt 0) { "Red" } else { "Green" })
+        Write-Host "════════════════════════════════" -ForegroundColor Cyan
+    }
+
+    Write-Host "`nDone." -ForegroundColor Green
+
+}
+finally {
+    Write-Host "`nDisconnecting from Exchange Online..." -ForegroundColor Cyan
+    Disconnect-ExchangeOnline -Confirm:$false
+}
