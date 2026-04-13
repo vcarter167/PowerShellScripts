@@ -38,19 +38,17 @@ This repo is a collection of PowerShell scripts built to eliminate that entirely
 **The scenario:** You've received a list of external partners, vendors, or organization contacts that need to be reachable via a shared distribution list. Normally this is two separate manual workflows — create each contact in Exchange, then add them to the group.
 
 **What the script does:**
-- Connects to Exchange Online via `Connect-ExchangeOnline`
-- Reads contact data from a CSV (`Name`, `Email`)
-- For each row: checks if the mail contact already exists — if not, creates it via `New-MailContact` with parsed first/last name
+- Prompts for your admin email and connects to Exchange Online via MFA browser authentication (`-DisableWAM`)
+- Prompts whether you are adding a **single contact** or **bulk importing** from a file
+- Prompts for the **target distribution list** name or email address and validates it exists before proceeding
+- **Single mode:** prompts for the contact's full name and external email address with inline validation
+- **Bulk mode:** accepts a `.csv` or `.xlsx`/`.xls` file — validates required columns, skips blank or malformed rows, and prints a summary on completion
+- For each contact: checks if the mail contact already exists — if not, creates it via `New-MailContact` with parsed first/last name
 - Checks if the contact is already a member of the target distribution list — if not, adds them via `Add-DistributionGroupMember`
 - Skips duplicates gracefully and logs every action to the console
+- Always disconnects from Exchange Online on completion, even if an error occurs
 
 **Time saved:** What takes 2–3 minutes per contact manually runs in seconds per record at scale.
-
-```powershell
-# Key variables to configure before running:
-$contacts = Import-Csv -Path "C:\Path\To\File.csv"
-$distributionList = "Your Distribution List Name"
-```
 
 ---
 
@@ -60,41 +58,54 @@ $distributionList = "Your Distribution List Name"
 **The scenario:** A new distribution list is being created — or an existing one needs to be populated from an HR export or onboarding roster. Adding 50 users one at a time through the Exchange Admin Center is not the move.
 
 **What the script does:**
-- Connects to Exchange Online
-- Reads users from a CSV (`Name`, `Email`)
+- Prompts for your admin email and connects to Exchange Online via MFA browser authentication (`-DisableWAM`)
+- Prompts whether you are adding a **single user** or **bulk importing** from a file
+- Prompts for the **target distribution list** name or email address and validates it exists before proceeding
+- **Single mode:** prompts for the user's full name and email address with inline validation
+- **Bulk mode:** accepts a `.csv` or `.xlsx`/`.xls` file — validates required columns, skips blank or malformed rows, and prints a summary on completion
 - For each user: checks for existing membership before attempting the add — no duplicate errors, no noise
 - Adds via `Add-DistributionGroupMember` with **color-coded console output**:
   - 🟢 **Green** — user successfully added
   - 🟡 **Yellow** — user already a member, skipped
-  - 🔵 **Cyan** — user processed confirmation
-- Disconnects from Exchange Online automatically on completion
-
-```powershell
-# Key variables to configure before running:
-$users = Import-Csv -Path "C:\Path\To\File.csv"
-$distributionList = "Your Distribution List Name"
-```
+  - 🔴 **Red** — error encountered
+- Always disconnects from Exchange Online on completion, even if an error occurs
 
 ---
 
 ### 3. `Add-UsersToSharedMailbox.ps1`
-> *GUI-driven bulk shared mailbox access provisioning — no command line required*
+> *Bulk shared mailbox access provisioning via console prompts*
 
 **The scenario:** A new department inbox or project mailbox is being stood up and a whole team needs Full Access. You need this done fast, and you may need to hand it off to someone else to run.
 
 **What the script does:**
-- Launches a **Windows Forms GUI** — no editing script paths or variables
-- Opens a **file picker dialog** (defaults to Desktop) for the admin to select the CSV visually
-- Prompts for the **shared mailbox email address** via a custom input box
-- Validates both inputs before proceeding — exits cleanly with a message if either is missing
+- Prompts for your admin email and connects to Exchange Online via MFA browser authentication (`-DisableWAM`)
+- Prompts for the **shared mailbox email address** and validates it exists in Exchange before proceeding
+- Prompts whether you are adding a **single user** or **bulk importing** from a file
+- **Single mode:** prompts for the user's full name and email address with inline validation
+- **Bulk mode:** accepts a `.csv` or `.xlsx`/`.xls` file — validates required columns, skips blank or malformed rows, and prints a summary on completion
 - Loops through each user and grants **Full Access** via `Add-MailboxPermission`
 - Suppresses known benign `-Member` parameter warnings while surfacing real errors in red
-
-> 💡 The GUI interface makes this safe to hand off to helpdesk staff or junior admins — no PowerShell experience needed to operate it.
+- Always disconnects from Exchange Online on completion, even if an error occurs
 
 ---
 
-### 4. `Update-EntraIDUserProfiles.ps1`
+### 4. `Get-UserDistributionGroups.ps1`
+> *Look up all distribution lists a user belongs to — single or bulk*
+
+**The scenario:** An offboarding request comes in, or you need to audit group memberships before a reorg. Finding every distribution list a user belongs to manually through the Exchange Admin Center means searching one group at a time.
+
+**What the script does:**
+- Prompts for your admin email and connects to Exchange Online via MFA browser authentication (`-DisableWAM`)
+- Prompts whether you are looking up a **single user** or **bulk looking up** from a file
+- Pre-fetches all distribution groups once before processing — significantly faster than querying per user on large tenants
+- **Single mode:** prompts for the user's email address and prints all matched groups in a formatted table
+- **Bulk mode:** accepts a `.csv` or `.xlsx`/`.xls` file with an `Email` column (`Name` optional) — processes each user and collects all results
+- At the end of a bulk run, offers to **export results to CSV** for reporting or compliance purposes
+- Always disconnects from Exchange Online on completion, even if an error occurs
+
+---
+
+### 5. `Update-EntraIDUserProfiles.ps1`
 > *Bulk update job titles, departments, and office locations in Entra ID from a CSV*
 
 **The scenario:** Post-reorg. Annual HR data sync. Title changes after a performance cycle. Whatever the trigger — you have a spreadsheet of users with updated attributes and a directory that doesn't reflect reality yet. Touching each profile manually in the Entra admin portal for 60+ people is hours of work.
@@ -121,7 +132,7 @@ $userData = Import-Csv -Path "C:\Path\To\File.csv"
 
 > Headers must match exactly — including capitalization and spacing.
 
-### Exchange Scripts (Scripts 1, 2, 3)
+### Exchange Scripts (Scripts 1, 2, 3, 4)
 
 ```csv
 Name,Email
@@ -131,12 +142,12 @@ John Doe,jdoe@externalpartner.com
 
 | Column | Required | Notes |
 |--------|----------|-------|
-| `Name` | ✅ | Full display name. For external contacts, must be `First Last` — script splits on space for `New-MailContact` |
+| `Name` | ✅ | Full display name. For external contacts, must be `First Last` — script splits on space for `New-MailContact`. Optional in Script 4 bulk mode. |
 | `Email` | ✅ | Primary SMTP address |
 
 ---
 
-### Entra ID Script (Script 4)
+### Entra ID Script (Script 5)
 
 ```csv
 Object Id,Display name,Title,Department,Office
@@ -158,16 +169,20 @@ a1b2c3d4-xxxx-xxxx-xxxx-xxxxxxxxxxxx,Jane Smith,Senior Engineer,001-Engineering,
 | Requirement | Scripts | Details |
 |-------------|---------|---------|
 | **PowerShell** | All | Version 5.1+ or PowerShell 7+ |
-| `ExchangeOnlineManagement` | 1, 2, 3 | Exchange Online connectivity |
-| `AzureAD` | 4 | Entra ID (Azure AD) connectivity |
-| **Exchange Admin** or **Global Admin** | 1, 2, 3 | Required to manage distribution groups and mailboxes |
-| **User Administrator** or **Global Admin** | 4 | Required to write user profile attributes in Entra ID |
+| `ExchangeOnlineManagement` | 1, 2, 3, 4 | Exchange Online connectivity |
+| `ImportExcel` | 1, 2, 3, 4 | Required for `.xlsx`/`.xls` bulk import support — auto-installed by scripts |
+| `AzureAD` | 5 | Entra ID (Azure AD) connectivity |
+| **Exchange Admin** or **Global Admin** | 1, 2, 3, 4 | Required to manage distribution groups and mailboxes |
+| **User Administrator** or **Global Admin** | 5 | Required to write user profile attributes in Entra ID |
 
 **Install modules:**
 
 ```powershell
 # Exchange Online Management
 Install-Module -Name ExchangeOnlineManagement -Force
+
+# ImportExcel (for .xlsx support)
+Install-Module -Name ImportExcel -Force
 
 # Entra ID (Azure AD)
 Install-Module -Name AzureAD -Force
@@ -184,15 +199,16 @@ cd PowerShellScripts
 
 # 2. Install required modules (if not already installed)
 Install-Module -Name ExchangeOnlineManagement -Force
+Install-Module -Name ImportExcel -Force
 Install-Module -Name AzureAD -Force
 
-# 3. Open the script you need, update the CSV path and target group/mailbox variables
+# 3. Run the script you need — all prompts are interactive, nothing to edit
+.\Add-ContactsToDistributionList.ps1
 
-# 4. Run it
-.\Add-UsersToDistributionList.ps1
+# 4. A browser window will open — sign in and complete MFA when prompted
 ```
 
-Each script will prompt you to authenticate to your tenant via browser — **no credentials are stored or hardcoded.**
+All Exchange scripts will prompt you for your admin email and authenticate via browser MFA using `-DisableWAM`. **No credentials are stored or hardcoded.**
 
 ---
 
@@ -208,7 +224,8 @@ When `Get-DistributionGroupMember` is called with a `-Member` filter in certain 
 |--------|--------|-------------|
 | ✅ Done | `Add-ContactsToDistributionList.ps1` | Bulk create external contacts + add to distro list |
 | ✅ Done | `Add-UsersToDistributionList.ps1` | Bulk add internal users to distribution list |
-| ✅ Done | `Add-UsersToSharedMailbox.ps1` | GUI-driven Full Access provisioning to shared mailbox |
+| ✅ Done | `Add-UsersToSharedMailbox.ps1` | Bulk Full Access provisioning to shared mailbox |
+| ✅ Done | `Get-UserDistributionGroups.ps1` | Look up all distribution lists a user belongs to |
 | ✅ Done | `Update-EntraIDUserProfiles.ps1` | Bulk update title, department, office via Entra ID |
 | 🔜 Planned | `Remove-UsersFromDistributionList.ps1` | Bulk offboarding from distribution groups |
 | 🔜 Planned | `Audit-DistributionListMembers.ps1` | Export full membership to CSV for compliance review |
