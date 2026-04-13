@@ -1,5 +1,5 @@
 # ============================================================
-#  Add-ExchangeContact.ps1
+#  Add-ContactstoDistributionList.ps1
 #  Adds one or more external mail contacts to Exchange Online
 #  and to a specified distribution list.
 #  Supports manual entry or bulk import via CSV / Excel.
